@@ -10,24 +10,35 @@ wkr_ips = []
 
 
 
-def execute_job(code):
+def upload_chunk(filename, chunk, mode):
+    scriptdir = os.path.dirname(__file__)
+    filepath = os.path.join(scriptdir, filename)
+    with open(filepath, mode) as f:
+        f.write(chunk.data)
+    return True
+
+def upload_file_in_chunks(worker, local_path, remote_filename):
+    with open(local_path, "rb") as f:
+        mode = "wb"
+        while True:
+            chunk = f.read(1024 * 1024) # 1MB chunks
+            if not chunk:
+                break
+            worker.upload_chunk(remote_filename, Client.Binary(chunk), mode)
+            mode = "ab" # append for subsequent chunks
+
+def execute_job():
     scriptdir = os.path.dirname(__file__)
     filepath = os.path.join(scriptdir,"temp_job.py")
-    with open(filepath,"w") as file:
-        file.write(code)
     result = sp.run(["python",filepath],capture_output=True,text=True)
     os.remove(filepath)
     return result.stdout
 
 
-def execute_ai_job(code,data,l_rate):
+def execute_ai_job(l_rate):
     scriptdir = os.path.dirname(__file__)
     scriptpath = os.path.join(scriptdir,"temp_job.py")
     datapath = os.path.join(scriptdir,"temp_data.txt")
-    with open(scriptpath,"w") as script:
-        script.write(code)
-    with open(datapath,"w") as data_obj:
-        data_obj.write(data)
     result = sp.run(["python",scriptpath,datapath,l_rate],capture_output=True,text=True)
     os.remove(scriptpath)
     os.remove(datapath)
@@ -40,15 +51,16 @@ def ai_train():
     scriptpath = os.path.join(scriptdir,"Script.py")
     datapath = os.path.join(scriptdir,"Data.txt")
     try:
-        with open(scriptpath,"r") as script:
-            payload = script.read()
-        with open(datapath,"r") as data:
-            data_payload = data.read()        
         print("Sending job...")
         for ip in wkr_ips:
             worker = Client.ServerProxy(f"http://{ip}:8000")
             l_rate = input(f"Learning rate for AI model going to ip_address: {ip}, is: ")
-            response = worker.execute_ai_job(payload,data_payload,l_rate)
+            
+            print(f"Uploading script and data to {ip}...")
+            upload_file_in_chunks(worker, scriptpath, "temp_job.py")
+            upload_file_in_chunks(worker, datapath, "temp_data.txt")
+            
+            response = worker.execute_ai_job(l_rate)
             print("Worker output:", response)
     except Exception as e:
         print(f"Error: {e}")
@@ -59,12 +71,14 @@ def single_job():
     scriptdir = os.path.dirname(__file__)
     scriptpath = os.path.join(scriptdir,"Script.py")
     try:
-        with open(scriptpath,"r") as script:
-            payload = script.read()
         print("Sending job...")
         for ip in wkr_ips:
             worker = Client.ServerProxy(f"http://{ip}:8000")
-            response = worker.execute_job(payload)
+            
+            print(f"Uploading script to {ip}...")
+            upload_file_in_chunks(worker, scriptpath, "temp_job.py")
+            
+            response = worker.execute_job()
             print("Worker output:", response)
     except Exception as e:
         print(f"Error: {e}")
@@ -117,8 +131,9 @@ while True:
     elif ch == 'W':
         server = Server(("0.0.0.0",8000), allow_none=True)
         print("Worker is listening on port 8000...")
-        server.register_function(execute_job,"execute_job")
-        server.register_function(execute_ai_job,"execute_ai_job")
+        server.register_function(upload_chunk, "upload_chunk")
+        server.register_function(execute_job, "execute_job")
+        server.register_function(execute_ai_job, "execute_ai_job")
         server_thread = thread.Thread(target=server.serve_forever)
         print("Server Starting")
         server_thread.start()
