@@ -4,10 +4,11 @@ import xmlrpc.client as Client
 import threading as thread
 from xmlrpc.server import SimpleXMLRPCServer as Server
 
-# Variables
-wkr_ips = [] 
-active_threads = []
 
+# Variables
+wkr_ips = set()  # Set to store worker IPs 
+active_threads = []
+test = "test.py"
 
 
 
@@ -46,7 +47,18 @@ def execute_ai_job(l_rate):
     return result.stdout
 
 def helper(i, ip, scriptpath, datapath=None):
-    if i == 1:
+    if i == 0:
+        try:
+            worker = Client.ServerProxy(f"http://{ip}:8000")
+            upload_file_in_chunks(worker, scriptpath, "temp_job.py")
+            response = worker.execute_job()
+            if response == "Test\n":
+                print(f"Worker {ip} is online and ready.")
+            else:
+                print(f"Worker {ip} responded with unexpected output: {response}")
+        except Exception as e:
+            print(f"Error with worker {ip}: {e}")
+    elif i == 1:
         try:
             worker = Client.ServerProxy(f"http://{ip}:8000")
             print(f"Uploading script to {ip}...")
@@ -81,14 +93,15 @@ def ai_train():
             t.start()
         for t in active_threads:
             t.join()
+            active_threads.remove(t)
     except Exception as e:
         print(f"Error: {e}")
 
 
-def single_job():
+def single_job(name="Script.py"):
     print("Starting the distributed job...")
     scriptdir = os.path.dirname(__file__)
-    scriptpath = os.path.join(scriptdir,"Script.py")
+    scriptpath = os.path.join(scriptdir, name)
     try:
         print("Sending job...")
         for ip in wkr_ips:
@@ -97,6 +110,7 @@ def single_job():
             t.start()
         for t in active_threads:
             t.join()
+            active_threads.remove(t)
     except Exception as e:
         print(f"Error: {e}")
 
@@ -112,8 +126,8 @@ def Menu():
         menu_choice = input("Select an option: ").strip().upper()
         if menu_choice == 'A':
             new_ip = input("Enter the Worker IP to add: ").strip()
-            wkr_ips.append(new_ip)
-            print(f"Added {new_ip} to the grid.")
+            wkr_ips.add(new_ip)
+            helper(0, new_ip, test)  # Call helper to run the test script on the new worker
         elif menu_choice == 'R':
             del_ip = input("Enter the Worker IP to remove: ").strip()
             if del_ip in wkr_ips:
