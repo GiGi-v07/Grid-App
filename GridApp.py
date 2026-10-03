@@ -2,6 +2,7 @@ import os as os
 import subprocess as sp
 import xmlrpc.client as Client
 import threading as thread
+import socket as socket
 from xmlrpc.server import SimpleXMLRPCServer as Server
 
 
@@ -9,7 +10,10 @@ from xmlrpc.server import SimpleXMLRPCServer as Server
 wkr_ips = set()  # Set to store worker IPs 
 active_threads = []
 test = "test.py"
-
+hostname = socket.gethostname()
+master_ip = str(socket.gethostbyname(hostname))
+ip_parts = master_ip.split('.')
+master_ip = '.'.join(ip_parts[:-1]) + '.'  # Get the first three octets of the IP address
 
 
 def upload_chunk(filename, chunk, mode):
@@ -125,7 +129,11 @@ def Menu():
         print("(Q)uit to Main Menu")
         menu_choice = input("Select an option: ").strip().upper()
         if menu_choice == 'A':
-            new_ip = input("Enter the Worker IP to add: ").strip()
+            ip = input("Enter the Worker IP to add: ").strip()
+            if ip == 'localhost':
+                new_ip = ip
+            else:
+                new_ip = str(master_ip) + ip
             wkr_ips.add(new_ip)
             helper(0, new_ip, test)  # Call helper to run the test script on the new worker
         elif menu_choice == 'R':
