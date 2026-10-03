@@ -6,6 +6,7 @@ from xmlrpc.server import SimpleXMLRPCServer as Server
 
 # Variables
 wkr_ips = [] 
+active_threads = []
 
 
 
@@ -44,6 +45,28 @@ def execute_ai_job(l_rate):
     os.remove(datapath)
     return result.stdout
 
+def helper(i, ip, scriptpath, datapath=None):
+    if i == 1:
+        try:
+            worker = Client.ServerProxy(f"http://{ip}:8000")
+            print(f"Uploading script to {ip}...")
+            upload_file_in_chunks(worker, scriptpath, "temp_job.py")
+            response = worker.execute_job()
+            print(f"Worker output from {ip}:", response)
+        except Exception as e:
+            print(f"Error with worker {ip}: {e}")
+    elif i == 2:
+        try:
+            worker = Client.ServerProxy(f"http://{ip}:8000")
+            l_rate = input(f"Learning rate for AI model going to ip_address: {ip}, is: ")
+            print(f"Uploading script and data to {ip}...")
+            upload_file_in_chunks(worker, scriptpath, "temp_job.py")
+            upload_file_in_chunks(worker, datapath, "temp_data.txt")
+            response = worker.execute_ai_job(l_rate)
+            print(f"Worker output from {ip}:", response)
+        except Exception as e:
+            print(f"Error with worker {ip}: {e}")
+
 
 def ai_train():
     print("Starting the distributed job...")
@@ -53,15 +76,11 @@ def ai_train():
     try:
         print("Sending job...")
         for ip in wkr_ips:
-            worker = Client.ServerProxy(f"http://{ip}:8000")
-            l_rate = input(f"Learning rate for AI model going to ip_address: {ip}, is: ")
-            
-            print(f"Uploading script and data to {ip}...")
-            upload_file_in_chunks(worker, scriptpath, "temp_job.py")
-            upload_file_in_chunks(worker, datapath, "temp_data.txt")
-            
-            response = worker.execute_ai_job(l_rate)
-            print("Worker output:", response)
+            t = thread.Thread(target=helper, args=(2,ip, scriptpath, datapath))
+            active_threads.append(t)
+            t.start()
+        for t in active_threads:
+            t.join()
     except Exception as e:
         print(f"Error: {e}")
 
@@ -73,13 +92,11 @@ def single_job():
     try:
         print("Sending job...")
         for ip in wkr_ips:
-            worker = Client.ServerProxy(f"http://{ip}:8000")
-            
-            print(f"Uploading script to {ip}...")
-            upload_file_in_chunks(worker, scriptpath, "temp_job.py")
-            
-            response = worker.execute_job()
-            print("Worker output:", response)
+            t = thread.Thread(target=helper, args=(1,ip, scriptpath))
+            active_threads.append(t)
+            t.start()
+        for t in active_threads:
+            t.join()
     except Exception as e:
         print(f"Error: {e}")
 
