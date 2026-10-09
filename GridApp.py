@@ -4,6 +4,7 @@ import xmlrpc.client as Client
 import threading as thread
 import socket as socket
 from xmlrpc.server import SimpleXMLRPCServer as Server
+import queue as queue
 
 
 # Variables
@@ -11,6 +12,7 @@ wkr_ips = set()  # Set to store worker IPs
 active_threads = []
 test = "test.py"
 hostname = socket.gethostname()
+job_queue = queue.Queue()  # Queue to manage jobs
 master_ip = str(socket.gethostbyname(hostname))
 ip_parts = master_ip.split('.')
 master_ip = '.'.join(ip_parts[:-1]) + '.'  # Get the first three octets of the IP address
