@@ -1,4 +1,4 @@
-import os as os
+import os
 import subprocess as sp
 import xmlrpc.client as Client
 import threading as thread
@@ -8,12 +8,11 @@ from xmlrpc.server import SimpleXMLRPCServer as Server
 # Variables
 wkr_ips = set()  # Set to store worker IPs 
 active_threads = []
-test = "test.py"
-
+scriptdir = os.path.dirname(os.path.abspath(__file__))
+test = os.path.join(scriptdir, "test.py")
 
 
 def upload_chunk(filename, chunk, mode):
-    scriptdir = os.path.dirname(__file__)
     filepath = os.path.join(scriptdir, filename)
     with open(filepath, mode) as f:
         f.write(chunk.data)
@@ -23,96 +22,125 @@ def upload_file_in_chunks(worker, local_path, remote_filename):
     with open(local_path, "rb") as f:
         mode = "wb"
         while True:
-            chunk = f.read(1024 * 1024) # 1MB chunks
+            chunk = f.read(1024 * 1024)  # 1MB chunks
             if not chunk:
                 break
             worker.upload_chunk(remote_filename, Client.Binary(chunk), mode)
-            mode = "ab" # append for subsequent chunks
+            mode = "ab"  # append for subsequent chunks
 
 def execute_job():
-    scriptdir = os.path.dirname(__file__)
-    filepath = os.path.join(scriptdir,"temp_job.py")
-    result = sp.run(["python",filepath],capture_output=True,text=True)
-    os.remove(filepath)
-    return result.stdout
+    filepath = os.path.join(scriptdir, "temp_job.py")
+    result = sp.run(["python", filepath], capture_output=True, text=True)
+    if os.path.exists(filepath):
+        os.remove(filepath)
+    output = result.stdout
+    if result.stderr:
+        output = (output + "\n[STDERR]:\n" + result.stderr) if output else result.stderr
+    return output
 
 
 def execute_ai_job(l_rate):
-    scriptdir = os.path.dirname(__file__)
-    scriptpath = os.path.join(scriptdir,"temp_job.py")
-    datapath = os.path.join(scriptdir,"temp_data.txt")
-    result = sp.run(["python",scriptpath,datapath,l_rate],capture_output=True,text=True)
-    os.remove(scriptpath)
-    os.remove(datapath)
-    return result.stdout
+    scriptpath = os.path.join(scriptdir, "temp_job.py")
+    datapath = os.path.join(scriptdir, "temp_data.txt")
+    result = sp.run(["python", scriptpath, datapath, str(l_rate)], capture_output=True, text=True)
+    if os.path.exists(scriptpath):
+        os.remove(scriptpath)
+    if os.path.exists(datapath):
+        os.remove(datapath)
+    output = result.stdout
+    if result.stderr:
+        output = (output + "\n[STDERR]:\n" + result.stderr) if output else result.stderr
+    return output
 
-def helper(i, ip, scriptpath, datapath=None):
+def helper(i, ip, scriptpath, datapath=None, l_rate="0.01"):
     if i == 0:
         try:
             worker = Client.ServerProxy(f"http://{ip}:8000")
             upload_file_in_chunks(worker, scriptpath, "temp_job.py")
             response = worker.execute_job()
-            if response == "Test\n":
+            if response and response.strip() == "Test":
                 print(f"Worker {ip} is online and ready.")
+                return True
             else:
                 print(f"Worker {ip} responded with unexpected output: {response}")
+                return False
         except Exception as e:
-            print(f"Error with worker {ip}: {e}")
+            print(f"Error connecting to worker {ip}: {e}")
+            return False
     elif i == 1:
         try:
             worker = Client.ServerProxy(f"http://{ip}:8000")
             print(f"Uploading script to {ip}...")
             upload_file_in_chunks(worker, scriptpath, "temp_job.py")
             response = worker.execute_job()
-            print(f"Worker output from {ip}:", response)
+            print(f"Worker output from {ip}:\n{response}")
         except Exception as e:
             print(f"Error with worker {ip}: {e}")
     elif i == 2:
         try:
             worker = Client.ServerProxy(f"http://{ip}:8000")
-            l_rate = input(f"Learning rate for AI model going to ip_address: {ip}, is: ")
-            print(f"Uploading script and data to {ip}...")
+            print(f"Uploading AI model script and dataset to {ip}...")
             upload_file_in_chunks(worker, scriptpath, "temp_job.py")
             upload_file_in_chunks(worker, datapath, "temp_data.txt")
+            print(f"Worker {ip} is training the AI model (lr={l_rate})...")
             response = worker.execute_ai_job(l_rate)
-            print(f"Worker output from {ip}:", response)
+            print(f"\n--- Worker Output from {ip} ---\n{response}")
         except Exception as e:
             print(f"Error with worker {ip}: {e}")
 
 
 def ai_train():
-    print("Starting the distributed job...")
-    scriptdir = os.path.dirname(__file__)
-    scriptpath = os.path.join(scriptdir,"Script.py")
-    datapath = os.path.join(scriptdir,"Data.txt")
+    if not wkr_ips:
+        print("No workers added yet! Please add at least one worker IP using (A).")
+        return
+    print("\nStarting Distributed AI Training Job...")
+    l_rate_input = input("Enter learning rate for AI model [default: 0.01]: ").strip()
+    l_rate = l_rate_input if l_rate_input else "0.01"
+
+    scriptpath = os.path.join(scriptdir, "Script.py")
+    datapath = os.path.join(scriptdir, "Data.txt")
+
+    if not os.path.exists(datapath):
+        print(f"Dataset not found at {datapath}. Generating synthetic dataset...")
+        try:
+            import Generate
+            Generate.generate_dataset(datapath)
+        except Exception as e:
+            print(f"Failed to generate dataset: {e}")
+            return
+
     try:
-        print("Sending job...")
-        for ip in wkr_ips:
-            t = thread.Thread(target=helper, args=(2,ip, scriptpath, datapath))
-            active_threads.append(t)
+        print(f"Dispatching training jobs to {len(wkr_ips)} worker(s) with learning rate {l_rate}...")
+        threads = []
+        for ip in list(wkr_ips):
+            t = thread.Thread(target=helper, args=(2, ip, scriptpath, datapath, l_rate))
+            threads.append(t)
             t.start()
-        for t in active_threads:
+        for t in threads:
             t.join()
-            active_threads.remove(t)
+        print("\nAll distributed AI training jobs completed.")
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error in distributed AI training: {e}")
 
 
 def single_job(name="Script.py"):
-    print("Starting the distributed job...")
-    scriptdir = os.path.dirname(__file__)
+    if not wkr_ips:
+        print("No workers added yet! Please add at least one worker IP using (A).")
+        return
+    print("\nStarting distributed single job...")
     scriptpath = os.path.join(scriptdir, name)
     try:
-        print("Sending job...")
-        for ip in wkr_ips:
-            t = thread.Thread(target=helper, args=(1,ip, scriptpath))
-            active_threads.append(t)
+        print(f"Dispatching job to {len(wkr_ips)} worker(s)...")
+        threads = []
+        for ip in list(wkr_ips):
+            t = thread.Thread(target=helper, args=(1, ip, scriptpath))
+            threads.append(t)
             t.start()
-        for t in active_threads:
+        for t in threads:
             t.join()
-            active_threads.remove(t)
+        print("\nAll worker jobs completed.")
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error in single job: {e}")
 
 
 def Menu():
@@ -125,9 +153,20 @@ def Menu():
         print("(Q)uit to Main Menu")
         menu_choice = input("Select an option: ").strip().upper()
         if menu_choice == 'A':
-            new_ip = input("Enter the Worker IP to add: ").strip()
-            wkr_ips.add(new_ip)
-            helper(0, new_ip, test)  # Call helper to run the test script on the new worker
+            new_ip = input("Enter the Worker IP to add (e.g. localhost or 192.168.x.x): ").strip()
+            if not new_ip:
+                print("IP address cannot be empty.")
+                continue
+            print(f"Testing connection to worker at {new_ip}:8000...")
+            online = helper(0, new_ip, test)
+            if online:
+                wkr_ips.add(new_ip)
+                print(f"Added {new_ip} to active workers.")
+            else:
+                add_anyway = input(f"Worker {new_ip} did not pass handshake. Add anyway? (y/N): ").strip().lower()
+                if add_anyway == 'y':
+                    wkr_ips.add(new_ip)
+                    print(f"Added {new_ip} (offline/unverified).")
         elif menu_choice == 'R':
             del_ip = input("Enter the Worker IP to remove: ").strip()
             if del_ip in wkr_ips:
@@ -136,10 +175,14 @@ def Menu():
             else:
                 print("Error: IP not found in the list.")
         elif menu_choice == 'V':
-            print(f"Current Worker IPs: {wkr_ips}")  
+            if wkr_ips:
+                print(f"Current Worker IPs ({len(wkr_ips)}): {list(wkr_ips)}")
+            else:
+                print("Current Worker IPs: None registered yet.")
         elif menu_choice == 'S':
-            print("Single task, type (S)ingle")
-            print("AI train, type (A)I")
+            print("\nSelect Job Type:")
+            print("(S)ingle Task")
+            print("(A)I Training")
             c = input("Choice: ").strip().upper()
             if c == 'S':
                 single_job()
@@ -154,27 +197,36 @@ def Menu():
             print("Invalid choice, please try again.")
         
 
-while True:
-    print("Run this laptop as (M)aster, (W)orker or (Q)uit Program?")
-    ch = input("Select an option: ").strip().upper()
-    if ch == 'Q':
-        break
-    elif ch == 'W':
-        server = Server(("0.0.0.0",8000), allow_none=True)
-        print("Worker is listening on port 8000...")
-        server.register_function(upload_chunk, "upload_chunk")
-        server.register_function(execute_job, "execute_job")
-        server.register_function(execute_ai_job, "execute_ai_job")
-        server_thread = thread.Thread(target=server.serve_forever)
-        print("Server Starting")
-        server_thread.start()
+if __name__ == "__main__":
+    while True:
+        print("\n===============================")
+        print("          GRID APP             ")
+        print("===============================")
+        print("Run this laptop as:")
+        print("(M)aster Node")
+        print("(W)orker Node")
+        print("(Q)uit Program")
+        ch = input("Select an option: ").strip().upper()
+        if ch == 'Q':
+            print("Exiting GridApp.")
+            break
+        elif ch == 'W':
+            server = Server(("0.0.0.0", 8000), allow_none=True)
+            print("\nWorker is listening on port 8000...")
+            server.register_function(upload_chunk, "upload_chunk")
+            server.register_function(execute_job, "execute_job")
+            server.register_function(execute_ai_job, "execute_ai_job")
+            server_thread = thread.Thread(target=server.serve_forever)
+            print("Server Started.")
+            server_thread.start()
 
-        input("Worker is running... Press [ENTER] to stop and switch modes.\n")
+            input("Worker is running... Press [ENTER] to stop and switch modes.\n")
 
-        print("Shutting down worker...")
-        server.shutdown()
-        server_thread.join()
-    elif ch == 'M':
-        Menu()
-    else:
-        print("Invalid choice.")
+            print("Shutting down worker...")
+            server.shutdown()
+            server_thread.join()
+            print("Worker stopped.")
+        elif ch == 'M':
+            Menu()
+        else:
+            print("Invalid choice.")
