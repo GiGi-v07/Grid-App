@@ -1,2 +1,6 @@
 *.pdf
 *.pyc
+Master.py
+Payload.py
+Generate.py
+ToDo.txt
