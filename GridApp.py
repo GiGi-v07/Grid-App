@@ -237,7 +237,7 @@ def get_queue_size():
     return job_queue.qsize()
 
 
-def helper(i, ip, scriptpath, datapath=None):
+def helper(i, ip, scriptpath, datapath=None, l_rate="0.01"):
     if not os.path.isabs(scriptpath):
         scriptdir = os.path.dirname(__file__)
         scriptpath = os.path.join(scriptdir, scriptpath)
@@ -275,46 +275,95 @@ def helper(i, ip, scriptpath, datapath=None):
     elif i == 2:
         try:
             worker = Client.ServerProxy(f"http://{ip}:8000")
-            l_rate = input(f"Learning rate for AI model going to ip_address: {ip}, is: ").strip()
-            print(f"Uploading script and data to {ip}...", flush=True)
-            job_file = f"temp_job_{uuid.uuid4().hex[:8]}.py"
-            data_file = f"temp_data_{uuid.uuid4().hex[:8]}.txt"
+            print(f"Uploading model script and dataset to {ip}...", flush=True)
+            script_ext = os.path.splitext(scriptpath)[1] or ".py"
+            data_ext = os.path.splitext(datapath)[1] or ".txt"
+            job_file = f"temp_job_{uuid.uuid4().hex[:8]}{script_ext}"
+            data_file = f"temp_data_{uuid.uuid4().hex[:8]}{data_ext}"
             upload_file_in_chunks(worker, scriptpath, job_file)
             upload_file_in_chunks(worker, datapath, data_file)
+            print(f"Worker {ip} is training the AI model (lr={l_rate})...", flush=True)
             t_call = time.time()
-            response = worker.execute_ai_job(l_rate, job_file, data_file)
+            response = worker.execute_ai_job(str(l_rate), job_file, data_file)
             rt = time.time() - t_call
             print(f"[TRANSFER IN ] Received response from {ip} | Size: {format_bytes(len(response))} | Round-Trip: {rt:.2f}s", flush=True)
-            print(f"Worker output from {ip}:\n{response}", flush=True)
+            print(f"\n==================== Worker {ip} Output ====================\n{response.strip()}\n============================================================\n", flush=True)
         except Exception as e:
             print(f"Error with worker {ip}: {e}", flush=True)
 
 
 
-def ai_train(script_name=None, data_name=None):
-    script_to_run = script_name if script_name else ai_script_path
-    data_to_run = data_name if data_name else ai_data_path
-    print(f"Starting distributed AI training job using script '{script_to_run}' and data '{data_to_run}'...")
-    scriptdir = os.path.dirname(__file__)
-    scriptpath = script_to_run if os.path.isabs(script_to_run) else os.path.join(scriptdir, script_to_run)
-    datapath = data_to_run if os.path.isabs(data_to_run) else os.path.join(scriptdir, data_to_run)
+def ai_train():
+    global ai_script_path, ai_data_path
+    if not wkr_ips:
+        print("\n[!] No workers added yet! Please add at least one worker IP using (A) first.")
+        return
+
+    scriptdir = os.path.dirname(os.path.abspath(__file__))
+
+    # Step 1: Select AI Model Script
+    print("\n--- Step 1: Select AI Model Script ---")
+    py_candidates = [
+        f for f in os.listdir(scriptdir)
+        if f.endswith(".py") and f not in ("GridApp.py", "Master.py", "Payload.py", "test.py")
+    ]
+    if py_candidates:
+        print(f"Available model scripts in directory: {', '.join(py_candidates)}")
+    default_model = ai_script_path if os.path.exists(os.path.join(scriptdir, ai_script_path)) else ("ai_script.py" if os.path.exists(os.path.join(scriptdir, "ai_script.py")) else "Script.py")
+    model_choice = input(f"Which file is the AI model script? [default: {default_model}]: ").strip()
+    if not model_choice:
+        model_choice = default_model
+
+    scriptpath = model_choice if os.path.isabs(model_choice) else os.path.join(scriptdir, model_choice)
     if not os.path.exists(scriptpath):
-        print(f"Error: Script file '{scriptpath}' not found.")
+        print(f"[Error] Model script file '{scriptpath}' not found.")
         return
+
+    # Step 2: Select Dataset File
+    print("\n--- Step 2: Select Dataset File ---")
+    data_candidates = [
+        f for f in os.listdir(scriptdir)
+        if f.endswith((".txt", ".csv", ".json", ".yaml", ".yml")) and not f.startswith("requirements") and f != "ToDo.txt"
+    ]
+    if data_candidates:
+        print(f"Available datasets in directory: {', '.join(data_candidates)}")
+    default_data = ai_data_path if os.path.exists(os.path.join(scriptdir, ai_data_path)) else ("ai_data.txt" if os.path.exists(os.path.join(scriptdir, "ai_data.txt")) else "Data.txt")
+    data_choice = input(f"Which file is the dataset? [default: {default_data}]: ").strip()
+    if not data_choice:
+        data_choice = default_data
+
+    datapath = data_choice if os.path.isabs(data_choice) else os.path.join(scriptdir, data_choice)
     if not os.path.exists(datapath):
-        print(f"Error: Data file '{datapath}' not found.")
+        print(f"[Error] Dataset file '{datapath}' not found.")
         return
+
+    # Step 3: Select Learning Rate
+    print("\n--- Step 3: Hyperparameters ---")
+    lr_input = input("Enter learning rate for AI model [default: 0.01]: ").strip()
+    l_rate = lr_input if lr_input else "0.01"
+
+    # Save choices as active session defaults
+    ai_script_path = model_choice
+    ai_data_path = data_choice
+
+    print("\n" + "=" * 62)
+    print(f"   STARTING DISTRIBUTED AI TRAINING ({len(wkr_ips)} worker(s))")
+    print(f"   Model Script : {os.path.basename(scriptpath)}")
+    print(f"   Dataset      : {os.path.basename(datapath)} ({format_bytes(os.path.getsize(datapath))})")
+    print(f"   Learning Rate: {l_rate}")
+    print("=" * 62 + "\n")
+
     try:
-        print("Sending job...")
         threads = []
         for ip in list(wkr_ips):
-            t = thread.Thread(target=helper, args=(2, ip, scriptpath, datapath))
+            t = thread.Thread(target=helper, args=(2, ip, scriptpath, datapath, l_rate))
             threads.append(t)
             t.start()
         for t in threads:
             t.join()
+        print("\nAll distributed AI training jobs completed.")
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error in distributed AI training: {e}")
 
 
 def single_job(name=None):
@@ -400,8 +449,9 @@ def Menu():
                 ai_data_path = "Data.txt"
                 print("All scripts reset to defaults: Script.py and Data.txt")
         elif menu_choice == 'S':
-            print("Single task, type (S)ingle")
-            print("AI train, type (A)I")
+            print("\nSelect Job Type:")
+            print("(S)ingle Task - Run a standalone Python script across workers")
+            print("(A)I Training - Interactively select AI model script & dataset, train, and view results")
             c = input("Choice: ").strip().upper()
             if c == 'S':
                 single_job()
