@@ -265,16 +265,18 @@ def train():
         except OSError:
             pass
 
-    # Save local JSON weights and standalone runnable model when run directly
+    # Save local JSON weights and standalone runnable model inside Trained_Models/ when run directly
     if SAVE_LOCAL_ARTIFACTS:
         try:
-            weights_file = os.path.join(scriptdir, "trained_weights.json")
+            models_dir = os.path.join(scriptdir, "Trained_Models")
+            os.makedirs(models_dir, exist_ok=True)
+            weights_file = os.path.join(models_dir, "trained_weights.json")
             with open(weights_file, "w", encoding="utf-8") as wf:
                 json.dump(result_payload, wf, indent=4)
-            model_script = os.path.join(scriptdir, "trained_model.py")
+            model_script = os.path.join(models_dir, "trained_model.py")
             generate_standalone_model_script(model_script, result_payload, eval_metrics["samples"])
-            print(f"\n[Saved] JSON Weights     : {os.path.basename(weights_file)}")
-            print(f"[Saved] Runnable Script  : {os.path.basename(model_script)}")
+            print(f"\n[Saved] JSON Weights     : Trained_Models/{os.path.basename(weights_file)}")
+            print(f"[Saved] Runnable Script  : Trained_Models/{os.path.basename(model_script)}")
         except Exception as e:
             print(f"Warning: Could not save local model files: {e}")
 

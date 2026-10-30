@@ -2,6 +2,7 @@
 *.pyc
 __pycache__/
 Archives/
+Trained_Models/
 Master.py
 Payload.py
 Generate.py

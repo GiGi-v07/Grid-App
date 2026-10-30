@@ -266,6 +266,9 @@ def multiple_testing(wkr_ips, scriptpath, datapath, upload_fn, format_bytes_fn):
 
     # Load test data locally to generate verification samples for the standalone scripts
     scriptdir = os.path.dirname(os.path.abspath(scriptpath))
+    models_dir = os.path.join(scriptdir, "Trained_Models")
+    os.makedirs(models_dir, exist_ok=True)
+
     test_file = os.path.join(scriptdir, "ai_test_data.txt")
     test_x, test_y = load_data(test_file)
     if not test_y:
@@ -292,38 +295,38 @@ def multiple_testing(wkr_ips, scriptpath, datapath, upload_fn, format_bytes_fn):
         safe_ip = _sanitize_name(ip)
         safe_lr = _sanitize_name(m["learning_rate"])
 
-        # 1. Save JSON weights file for this worker
+        # 1. Save JSON weights file for this worker inside Trained_Models/
         json_filename = f"weights_{safe_ip}_lr_{safe_lr}.json"
-        json_path = os.path.join(scriptdir, json_filename)
+        json_path = os.path.join(models_dir, json_filename)
         with open(json_path, "w", encoding="utf-8") as jf:
             json.dump(m, jf, indent=4)
 
-        # 2. Save standalone runnable Python script for this worker
+        # 2. Save standalone runnable Python script for this worker inside Trained_Models/
         py_filename = f"trained_model_{safe_ip}_lr_{safe_lr}.py"
-        py_path = os.path.join(scriptdir, py_filename)
+        py_path = os.path.join(models_dir, py_filename)
         generate_standalone_model_script(py_path, m, eval_info["samples"])
 
         r2_pct = max(0.0, m["test_r2"] * 100.0) if not m.get("diverged") else 0.0
         print(f"- Worker {ip} (lr={m['learning_rate']}):")
         print(f"    Learned Model : y = {m['w1']:.4f}*x1 + ({m['w2']:.4f})*x2 + {m['bias']:.4f}")
         print(f"    Test MSE      : {m['test_mse']:.4f} | Test R^2 Accuracy: {r2_pct:.2f}%")
-        print(f"    Saved Files   : {json_filename} , {py_filename}")
+        print(f"    Saved Files   : Trained_Models/{json_filename} , Trained_Models/{py_filename}")
 
         if not m.get("diverged") and (best_model is None or m["test_mse"] < best_model["test_mse"]):
             best_model = m
             best_ip = ip
 
     if best_model:
-        # Also save the best overall worker model to default trained_model.py & trained_weights.json
+        # Also save the best overall worker model to Trained_Models/trained_model.py & trained_weights.json
         best_eval = evaluate_model(test_x, test_y, best_model["w1"], best_model["w2"], best_model["bias"])
-        with open(os.path.join(scriptdir, "trained_weights.json"), "w", encoding="utf-8") as bf:
+        with open(os.path.join(models_dir, "trained_weights.json"), "w", encoding="utf-8") as bf:
             json.dump(best_model, bf, indent=4)
         generate_standalone_model_script(
-            os.path.join(scriptdir, "trained_model.py"), best_model, best_eval["samples"]
+            os.path.join(models_dir, "trained_model.py"), best_model, best_eval["samples"]
         )
         print("\n" + "-" * 66)
         print(f"Best Performing Model: Worker {best_ip} (lr={best_model['learning_rate']}, Test MSE={best_model['test_mse']:.4f})")
-        print("Saved best overall model to: trained_weights.json & trained_model.py")
+        print("Saved best overall model to: Trained_Models/trained_weights.json & Trained_Models/trained_model.py")
         print("-" * 66)
 
 
@@ -505,7 +508,10 @@ def data_splitting(wkr_ips, scriptpath, datapath, upload_fn, format_bytes_fn, wk
             print(f"  Input ({x1_val:5.2f}, {x2_val:5.2f}) | Member Votes: [{votes_str}] "
                   f"-> Council Consensus: {s['predicted']:6.3f} (Actual: {actual_val:6.3f})")
 
-    # Save JSON file of the Council weights and individual member models
+    # Save JSON file of the Council weights and individual member models inside Trained_Models/
+    models_dir = os.path.join(scriptdir, "Trained_Models")
+    os.makedirs(models_dir, exist_ok=True)
+
     council_json_payload = {
         "council_size": len(council_members),
         "learning_rate": l_rate,
@@ -519,12 +525,12 @@ def data_splitting(wkr_ips, scriptpath, datapath, upload_fn, format_bytes_fn, wk
         "council_test_r2": round(council_eval["r2_score"], 6),
         "members": council_members,
     }
-    council_json_path = os.path.join(scriptdir, "council_weights.json")
+    council_json_path = os.path.join(models_dir, "council_weights.json")
     with open(council_json_path, "w", encoding="utf-8") as cjf:
         json.dump(council_json_payload, cjf, indent=4)
 
-    # Save standalone runnable Python script for the Council of AIs
-    council_py_path = os.path.join(scriptdir, "council_model.py")
+    # Save standalone runnable Python script for the Council of AIs inside Trained_Models/
+    council_py_path = os.path.join(models_dir, "council_model.py")
     ensemble_metrics = {
         "avg_w1": avg_w1,
         "avg_w2": avg_w2,
@@ -535,8 +541,8 @@ def data_splitting(wkr_ips, scriptpath, datapath, upload_fn, format_bytes_fn, wk
     }
     generate_council_script(council_py_path, council_members, ensemble_metrics, council_eval["samples"])
 
-    print("\n[Saved] Council JSON Weights    : council_weights.json")
-    print("[Saved] Council Runnable Script : council_model.py")
+    print("\n[Saved] Council JSON Weights    : Trained_Models/council_weights.json")
+    print("[Saved] Council Runnable Script : Trained_Models/council_model.py")
     print("=" * 66)
 
 

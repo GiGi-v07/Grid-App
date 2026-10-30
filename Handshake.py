@@ -93,3 +93,4 @@ def collect_system_specs():
 
 if __name__ == "__main__":
     collect_system_specs()
+
