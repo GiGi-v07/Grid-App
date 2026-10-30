@@ -1,6 +1,7 @@
 *.pdf
 *.pyc
 __pycache__/
+Archives/
 Master.py
 Payload.py
 Generate.py

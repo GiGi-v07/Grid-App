@@ -328,25 +328,28 @@ def multiple_testing(wkr_ips, scriptpath, datapath, upload_fn, format_bytes_fn):
 
 
 # ==============================================================================
-# MODE 2: DATA SPLITTING (Partitioned Training + Council of AIs Ensemble)
+# MODE 2: DATA SPLITTING (Spec-Proportional Partitioning + Council of AIs)
 # ==============================================================================
 
-def data_splitting(wkr_ips, scriptpath, datapath, upload_fn, format_bytes_fn):
+def data_splitting(wkr_ips, scriptpath, datapath, upload_fn, format_bytes_fn, wkr_specs=None):
     """
     Mode 2 - Data Splitting (Council of AIs):
-    1. Splits the training dataset into N disjoint partitions (one per worker).
-    2. Trains a separate model on each worker using only its assigned data slice.
+    1. Splits the training dataset across connected workers proportionally to
+       each worker's hardware spec_score (CPU cores, free RAM, CPU throughput)
+       fetched during the Node Spec Handshake.
+    2. Trains a separate model on each worker using its proportional data slice.
     3. Collects all trained models from the workers and combines them into a
        single Council of AIs ensemble.
     4. Evaluates the Council of AIs on testing data and saves both
        'council_weights.json' and a standalone runnable 'council_model.py'.
     """
     print("\n" + "=" * 66)
-    print("   MODE 2: DATA SPLITTING (Partitioned Training -> Council of AIs)")
+    print("   MODE 2: DATA SPLITTING (Spec-Proportional -> Council of AIs)")
     print("=" * 66)
 
     worker_list = list(wkr_ips)
     num_workers = len(worker_list)
+    wkr_specs = wkr_specs or {}
 
     lr_input = input("Enter learning rate for Council workers (default 0.01): ").strip()
     try:
@@ -376,29 +379,49 @@ def data_splitting(wkr_ips, scriptpath, datapath, upload_fn, format_bytes_fn):
         all_x, all_y = load_data(datapath)
         test_x, test_y = all_x[split_idx:], all_y[split_idx:]
 
-    # Partition train_lines evenly across all connected workers
+    # Compute each worker's hardware spec_score for proportional data splitting
     total_rows = len(train_lines)
-    chunk_size = total_rows // num_workers
+    scores = {}
+    for ip in worker_list:
+        sp_info = wkr_specs.get(ip, {})
+        scores[ip] = max(1.0, float(sp_info.get("spec_score", 10.0)))
+    total_spec_score = sum(scores.values())
+
     temp_partition_files = []
     results = {}
     results_lock = thread.Lock()
     threads = []
 
-    print(f"\nSplitting {total_rows} training records across {num_workers} worker(s) (~{chunk_size} records per worker)...")
+    print(f"\nSplitting {total_rows} training records proportionally to Worker Specs across {num_workers} worker(s):")
 
     try:
+        current_idx = 0
         for idx, ip in enumerate(worker_list):
-            start_i = idx * chunk_size
-            end_i = total_rows if idx == num_workers - 1 else (idx + 1) * chunk_size
-            subset_lines = train_lines[start_i:end_i]
+            sp_info = wkr_specs.get(ip, {})
+            share_ratio = scores[ip] / total_spec_score
+            share_pct = share_ratio * 100.0
 
+            if idx == num_workers - 1:
+                end_i = total_rows
+            else:
+                remaining_workers = num_workers - 1 - idx
+                allocated = max(1, round(total_rows * share_ratio))
+                max_allowed = total_rows - current_idx - remaining_workers
+                end_i = current_idx + min(allocated, max_allowed)
+
+            subset_lines = train_lines[current_idx:end_i]
             part_path = os.path.join(scriptdir, f"_partition_{idx + 1}_{uuid.uuid4().hex[:6]}.txt")
             with open(part_path, "w", encoding="utf-8") as pf:
                 pf.write("\n".join(subset_lines) + "\n")
             temp_partition_files.append(part_path)
 
-            print(f"  -> Worker {ip}: Assigned rows {start_i + 1} to {end_i} ({len(subset_lines)} rows)")
-            job_label = f"AI Council Part {idx + 1}/{num_workers} (lr={l_rate})"
+            cores_desc = f"{sp_info.get('cores', '?')} Cores, {sp_info.get('avail_ram_gb', '?')} GB free RAM" if sp_info else "Default Spec"
+            print(
+                f"  -> Worker {ip} [{cores_desc} | Score: {scores[ip]:.1f} ({share_pct:.1f}%)] : "
+                f"Rows {current_idx + 1}..{end_i} ({len(subset_lines)} rows)"
+            )
+            current_idx = end_i
+            job_label = f"AI Council Part {idx + 1}/{num_workers} ({share_pct:.0f}% slice, lr={l_rate})"
 
             t = thread.Thread(
                 target=_dispatch_ai_worker,
@@ -424,17 +447,20 @@ def data_splitting(wkr_ips, scriptpath, datapath, upload_fn, format_bytes_fn):
         res = results.get(ip)
         if res and res.get("success") and res.get("model") and not res["model"].get("diverged"):
             m = res["model"]
-            # Weight each council member by its training sample count & test R^2 quality
-            r2_weight = max(0.1, float(m.get("test_r2", 0.5)))
+            # Weight each council member by its proportional sample share and test R^2 accuracy
+            sample_share = max(1, int(m.get("train_samples", 1))) / max(1, total_rows)
+            r2_factor = max(0.1, float(m.get("test_r2", 0.5)))
+            combined_weight = round(sample_share * r2_factor, 4)
             council_members.append({
                 "worker_ip": ip,
+                "spec_score": scores.get(ip, 10.0),
                 "w1": m["w1"],
                 "w2": m["w2"],
                 "bias": m["bias"],
                 "train_samples": m["train_samples"],
                 "worker_test_mse": m["test_mse"],
                 "worker_test_r2": m["test_r2"],
-                "weight": round(r2_weight, 4),
+                "weight": max(0.01, combined_weight),
             })
 
     if not council_members:
@@ -518,13 +544,13 @@ def data_splitting(wkr_ips, scriptpath, datapath, upload_fn, format_bytes_fn):
 # MAIN ENTRY POINT CALLED BY GRIDAPP.PY
 # ==============================================================================
 
-def start_ai_training(wkr_ips, ai_script_path, ai_data_path, upload_fn, format_bytes_fn):
+def start_ai_training(wkr_ips, ai_script_path, ai_data_path, upload_fn, format_bytes_fn, wkr_specs=None):
     """
     Entry point invoked by GridApp.py when the user selects AI Training.
     Validates the script, dataset, and connected workers, then lets the user
     choose between:
       1. Multiple Testing (Full model trained on each worker with different learning rates)
-      2. Data Splitting (Dataset split across workers and combined into a Council of AIs)
+      2. Data Splitting (Dataset split across workers proportionally to specs & combined into a Council of AIs)
     """
     if not wkr_ips:
         print("Error: No worker IPs added. Please add at least one worker IP first.")
@@ -544,13 +570,13 @@ def start_ai_training(wkr_ips, ai_script_path, ai_data_path, upload_fn, format_b
     print("\n--- Distributed AI Training Modes ---")
     print(f"Script : {os.path.basename(scriptpath)} | Dataset: {os.path.basename(datapath)} | Workers: {len(wkr_ips)}")
     print("(M)ultiple Testing : Train full model on each worker with different learning rates")
-    print("(D)ata Splitting   : Split dataset across workers & combine into a Council of AIs")
+    print("(D)ata Splitting   : Split dataset proportionally to worker specs & combine into a Council of AIs")
     mode = input("Select AI training mode (M/D): ").strip().upper()
 
     if mode == "M":
         multiple_testing(wkr_ips, scriptpath, datapath, upload_fn, format_bytes_fn)
     elif mode == "D":
-        data_splitting(wkr_ips, scriptpath, datapath, upload_fn, format_bytes_fn)
+        data_splitting(wkr_ips, scriptpath, datapath, upload_fn, format_bytes_fn, wkr_specs=wkr_specs)
     else:
         print("Invalid AI mode selection.")
 

@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 import subprocess as sp
 import xmlrpc.client as Client
 import threading as thread
@@ -32,7 +33,7 @@ _enqueued_jobs = {}
 
 
 # ==============================================================================
-# UTILITY FUNCTIONS
+# UTILITY & NETWORKING FUNCTIONS
 # ==============================================================================
 
 def format_bytes(num_bytes):
@@ -55,6 +56,26 @@ def get_local_ip():
             return str(socket.gethostbyname(socket.gethostname()))
         except Exception:
             return "127.0.0.1"
+
+
+def get_subnet_prefix():
+    """
+    Dynamically fetches the current Master IP's first 3 octets (e.g. '192.168.1.')
+    each time an IP is added or removed so network changes are handled automatically.
+    """
+    local_ip = get_local_ip()
+    return '.'.join(local_ip.split('.')[:-1]) + '.'
+
+
+def resolve_worker_ip(user_input):
+    """
+    Converts a user-entered host octet (e.g. '42') into a full IP address using
+    the current Master subnet prefix, while also supporting 'localhost' or full IPs.
+    """
+    val = user_input.strip()
+    if val == "localhost" or "." in val:
+        return val
+    return get_subnet_prefix() + val
 
 
 # ==============================================================================
@@ -93,10 +114,10 @@ class ThreadedXMLRPCServer(ThreadingMixIn, Server):
 # GLOBAL MASTER & WORKER CONFIGURATION VARIABLES
 # ==============================================================================
 
-wkr_ips = set()                       # Set of active Worker IP addresses registered on Master
-test = "test.py"                      # Handshake verification script
+wkr_ips = set()                       # Set of verified Worker IP addresses
+wkr_specs = {}                        # Dict mapping verified Worker IP -> hardware specs dict
+handshake_script = "Handshake.py"     # Node Spec Handshake & hardware profiler script
 job_queue = queue.Queue()             # FIFO queue holding jobs waiting to execute on Worker
-master_ip = '.'.join(get_local_ip().split('.')[:-1]) + '.'  # Local subnet prefix (e.g. '192.168.1.')
 
 # Configurable paths for Single Job and AI Training (passed to AITrainer)
 single_script_path = "Script.py"
@@ -135,8 +156,8 @@ def upload_chunk(filename, chunk, mode, is_last=False, job_id=None, job_name=Non
     if is_first_chunk:
         key = job_id if job_id else filename
         with _queue_lock:
-            if key not in _enqueued_jobs and (job_id or filename.startswith("temp_job")):
-                resolved_name = job_name or ("Virtual Handshake" if filename == "temp_job.py" else f"Job ({filename})")
+            if key not in _enqueued_jobs and (job_id or filename.startswith("temp_")):
+                resolved_name = job_name or ("Node Spec Handshake" if filename == "temp_handshake.py" else f"Job ({filename})")
                 _enqueued_jobs[key] = resolved_name
                 _queued_count += 1
                 print(f"[QUEUE +1    ] Enqueued {resolved_name} from {client_ip} | Queue Size: {_queued_count}", flush=True)
@@ -222,7 +243,7 @@ def execute_job(job_target="temp_job.py", job_id=None):
     with _queue_lock:
         job_name = _enqueued_jobs.pop(key, None)
         if not job_name:
-            job_name = "Virtual Handshake" if base_name == "temp_job.py" else f"Job ({base_name})"
+            job_name = "Node Spec Handshake" if base_name == "temp_handshake.py" else f"Job ({base_name})"
             _queued_count += 1
             print(f"[QUEUE +1    ] Enqueued {job_name} from {client_ip} | Queue Size: {_queued_count}", flush=True)
 
@@ -255,7 +276,9 @@ def get_queue_size():
 def helper(i, ip, scriptpath):
     """
     Master-side dispatcher that connects to a specific Worker IP:
-    - i == 0: Sends 'test.py' as a handshake check to verify the Worker is online.
+    - i == 0: Sends 'Handshake.py' (Node Spec Handshake) to verify the Worker is
+              online and fetch its hardware specs. Only adds the IP to wkr_ips
+              if the handshake succeeds.
     - i == 1: Uploads and executes a standard single Python job on the Worker.
     """
     if not os.path.isabs(scriptpath):
@@ -267,15 +290,31 @@ def helper(i, ip, scriptpath):
         job_id = f"job_{uid}"
 
         if i == 0:
-            upload_file_in_chunks(worker, scriptpath, "temp_job.py", job_id=job_id, job_name="Virtual Handshake")
+            upload_file_in_chunks(worker, scriptpath, "temp_handshake.py", job_id=job_id, job_name="Node Spec Handshake")
             t_call = time.time()
-            response = worker.execute_job("temp_job.py", job_id)
+            response = worker.execute_job("temp_handshake.py", job_id)
             rt = time.time() - t_call
             print(f"[TRANSFER IN ] Received response from {ip} | Size: {format_bytes(len(response))} | Round-Trip: {rt:.2f}s", flush=True)
-            if response == "Test\n":
-                print(f"Worker {ip} is online and ready.", flush=True)
+
+            marker = "HANDSHAKE_SPECS:"
+            specs = None
+            for line in response.splitlines():
+                if line.strip().startswith(marker):
+                    specs = json.loads(line.strip()[len(marker):])
+                    break
+
+            if specs and specs.get("status") == "ONLINE":
+                wkr_ips.add(ip)
+                wkr_specs[ip] = specs
+                print(
+                    f"Worker {ip} is online and verified! | "
+                    f"CPU: {specs['cores']} Cores ({specs['cpu_mops']} MOPS) | "
+                    f"RAM: {specs['avail_ram_gb']}/{specs['total_ram_gb']} GB Free | "
+                    f"Spec Score: {specs['spec_score']}",
+                    flush=True,
+                )
             else:
-                print(f"Worker {ip} responded with unexpected output: {response}", flush=True)
+                print(f"Handshake failed: Worker {ip} returned unexpected output ({response.strip()}). IP was NOT added.", flush=True)
 
         elif i == 1:
             print(f"Uploading script to {ip}...", flush=True)
@@ -289,7 +328,9 @@ def helper(i, ip, scriptpath):
             print(f"Worker output from {ip}:\n{response}", flush=True)
 
     except Exception as e:
-        print(f"Error with worker {ip}: {e}", flush=True)
+        print(f"Error connecting to worker {ip}: {e}", flush=True)
+        if i == 0:
+            print(f"Handshake failed for {ip}. Worker was NOT added to the active list.", flush=True)
 
 
 def single_job(name=None):
@@ -297,6 +338,10 @@ def single_job(name=None):
     Sends a single Python script in parallel threads to all registered Workers
     and waits for all Workers to finish executing it.
     """
+    if not wkr_ips:
+        print("Error: No worker IPs added. Please add at least one worker IP first.")
+        return
+
     script_to_run = name if name else single_script_path
     print(f"Starting distributed single job using script '{script_to_run}'...")
     scriptdir = os.path.dirname(__file__)
@@ -316,7 +361,8 @@ def single_job(name=None):
 def Menu():
     """
     Interactive console menu for Master node management:
-    Allows adding/removing Worker IPs, configuring script/dataset paths,
+    Allows adding/removing Worker IPs (dynamically resolving the local subnet
+    prefix each time), viewing Worker hardware specs, configuring script paths,
     and launching Single Jobs or Distributed AI Training (via AITrainer.py).
     """
     global single_script_path, ai_script_path, ai_data_path
@@ -324,28 +370,58 @@ def Menu():
         print("\n--- Master Node Management ---")
         print("(A)dd an IP")
         print("(R)emove an IP")
-        print("(V)iew current IPs")
+        print("(V)iew current IPs & Specs")
         print("(C)hange Script / Path")
         print("(S)tart Job")
         print("(Q)uit to Main Menu")
         menu_choice = input("Select an option: ").strip().upper()
 
         if menu_choice == 'A':
-            ip = input("Enter the Worker IP to add: ").strip()
-            new_ip = ip if (ip == 'localhost' or '.' in ip) else str(master_ip) + ip
-            wkr_ips.add(new_ip)
-            helper(0, new_ip, test)
+            ip_input = input("Enter the Worker IP to add (last octet, e.g. 42): ").strip()
+            if not ip_input:
+                continue
+            new_ip = resolve_worker_ip(ip_input)
+            # Only adds new_ip inside helper(0, ...) if Node Spec Handshake succeeds
+            helper(0, new_ip, handshake_script)
 
         elif menu_choice == 'R':
-            del_ip = input("Enter the Worker IP to remove: ").strip()
-            if del_ip in wkr_ips:
-                wkr_ips.remove(del_ip)
-                print(f"Removed {del_ip}.")
+            del_input = input("Enter the Worker IP to remove (last octet, e.g. 42): ").strip()
+            if not del_input:
+                continue
+            candidate_ip = resolve_worker_ip(del_input)
+            target_ip = None
+            if candidate_ip in wkr_ips:
+                target_ip = candidate_ip
             else:
-                print("Error: IP not found in the list.")
+                # Also match by final octet in case the local subnet changed
+                for existing_ip in wkr_ips:
+                    if existing_ip == del_input or existing_ip.split('.')[-1] == del_input:
+                        target_ip = existing_ip
+                        break
+
+            if target_ip:
+                wkr_ips.remove(target_ip)
+                wkr_specs.pop(target_ip, None)
+                print(f"Removed {target_ip}.")
+            else:
+                print(f"Error: Worker '{del_input}' not found in the active list.")
 
         elif menu_choice == 'V':
-            print(f"Current Worker IPs: {wkr_ips}")
+            if not wkr_ips:
+                print("No active Workers currently registered.")
+            else:
+                print("\n--- Connected Workers & Hardware Specs ---")
+                for ip in sorted(wkr_ips):
+                    sp_info = wkr_specs.get(ip)
+                    if sp_info:
+                        print(
+                            f"  * {ip} (Octet: {ip.split('.')[-1]}) -> "
+                            f"CPU: {sp_info['cores']} Cores ({sp_info['cpu_mops']} MOPS) | "
+                            f"RAM: {sp_info['avail_ram_gb']}/{sp_info['total_ram_gb']} GB | "
+                            f"Spec Score: {sp_info['spec_score']}"
+                        )
+                    else:
+                        print(f"  * {ip}")
 
         elif menu_choice == 'C':
             print("\n--- Configure Scripts & Paths ---")
@@ -353,7 +429,7 @@ def Menu():
             print(f"2. AI Training Script  : {ai_script_path}")
             print(f"3. AI Training Dataset : {ai_data_path}")
             print("4. Switch AI to ai_script.py / ai_data.txt")
-            print("5. Reset all to defaults (Script.py / Data.txt)")
+            print("5. Reset Single Job to Script.py")
             print("6. Back to Master Menu")
             cfg = input("Select option (1-6): ").strip()
             if cfg == '1':
@@ -372,8 +448,8 @@ def Menu():
                 ai_script_path, ai_data_path = "ai_script.py", "ai_data.txt"
                 print("AI job configured to use: ai_script.py and ai_data.txt")
             elif cfg == '5':
-                single_script_path, ai_script_path, ai_data_path = "Script.py", "Script.py", "Data.txt"
-                print("All scripts reset to defaults: Script.py and Data.txt")
+                single_script_path = "Script.py"
+                print("Single Job script reset to: Script.py")
 
         elif menu_choice == 'S':
             print("Single task, type (S)ingle")
@@ -382,8 +458,8 @@ def Menu():
             if c == 'S':
                 single_job()
             elif c == 'A':
-                # Delegate all AI training execution to AITrainer.py
-                AITrainer.start_ai_training(wkr_ips, ai_script_path, ai_data_path, upload_file_in_chunks, format_bytes)
+                # Delegate all AI training execution and proportional data splitting to AITrainer.py
+                AITrainer.start_ai_training(wkr_ips, ai_script_path, ai_data_path, upload_file_in_chunks, format_bytes, wkr_specs)
             else:
                 print("Invalid choice")
 
