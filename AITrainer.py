@@ -163,11 +163,13 @@ def _dispatch_ai_worker(ip, base_script_path, data_path, l_rate, job_label, uplo
     it via the worker's standard execute_job RPC.
     """
     scriptdir = os.path.dirname(os.path.abspath(base_script_path))
+    temp_dir = os.path.join(scriptdir, "Temp_Jobs")
+    os.makedirs(temp_dir, exist_ok=True)
     uid = uuid.uuid4().hex[:8]
     job_id = f"job_{uid}"
     remote_job_file = f"temp_job_{uid}.py"
     remote_data_file = f"temp_data_{uid}.txt"
-    local_temp_script = os.path.join(scriptdir, f"_local_prep_{uid}.py")
+    local_temp_script = os.path.join(temp_dir, f"_local_prep_{uid}.py")
 
     try:
         # Prepare worker-specific copy of the AI script with its learning rate & data file
@@ -413,7 +415,9 @@ def data_splitting(wkr_ips, scriptpath, datapath, upload_fn, format_bytes_fn, wk
                 end_i = current_idx + min(allocated, max_allowed)
 
             subset_lines = train_lines[current_idx:end_i]
-            part_path = os.path.join(scriptdir, f"_partition_{idx + 1}_{uuid.uuid4().hex[:6]}.txt")
+            temp_dir = os.path.join(scriptdir, "Temp_Jobs")
+            os.makedirs(temp_dir, exist_ok=True)
+            part_path = os.path.join(temp_dir, f"_partition_{idx + 1}_{uuid.uuid4().hex[:6]}.txt")
             with open(part_path, "w", encoding="utf-8") as pf:
                 pf.write("\n".join(subset_lines) + "\n")
             temp_partition_files.append(part_path)

@@ -123,6 +123,8 @@ job_queue = queue.Queue()             # FIFO queue holding jobs waiting to execu
 single_script_path = "Script.py"
 ai_script_path = "ai_script.py"
 ai_data_path = "ai_data.txt"
+TEMP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Temp_Jobs")
+os.makedirs(TEMP_DIR, exist_ok=True)
 
 
 # ==============================================================================
@@ -134,12 +136,13 @@ def upload_chunk(filename, chunk, mode, is_last=False, job_id=None, job_name=Non
     RPC function called on the Worker to receive a 1MB file chunk from the Master.
     - On the first chunk ('wb'), registers the job in the queue and logs '[QUEUE +1]'
       and '[TRANSFER IN] Receiving...'.
-    - Writes the chunk bytes to disk.
+    - Writes the chunk bytes into the 'Temp_Jobs/' directory.
     - On the final chunk (is_last=True), immediately logs the completed transfer stats.
     """
     global _queued_count
     client_ip = getattr(_thread_local, "client_ip", "Unknown")
-    filepath = os.path.join(os.path.dirname(__file__), filename)
+    os.makedirs(TEMP_DIR, exist_ok=True)
+    filepath = os.path.join(TEMP_DIR, os.path.basename(filename))
     data = chunk.data if hasattr(chunk, "data") else chunk
 
     with _upload_lock:
@@ -232,9 +235,9 @@ def execute_job(job_target="temp_job.py", job_id=None):
     """
     global _queued_count
     client_ip = getattr(_thread_local, "client_ip", "Unknown")
-    scriptdir = os.path.dirname(__file__)
-    target_path = os.path.join(scriptdir, job_target)
-    base_name = os.path.basename(target_path)
+    os.makedirs(TEMP_DIR, exist_ok=True)
+    base_name = os.path.basename(job_target)
+    target_path = os.path.join(TEMP_DIR, base_name)
 
     report_inbound_transfer(base_name, client_ip)
 

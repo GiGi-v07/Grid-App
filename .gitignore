@@ -3,6 +3,7 @@
 __pycache__/
 Archives/
 Trained_Models/
+Temp_Jobs/
 Master.py
 Payload.py
 Generate.py

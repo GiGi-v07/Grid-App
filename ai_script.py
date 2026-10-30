@@ -159,6 +159,10 @@ def train():
     scriptdir = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else "."
     default_data = os.path.join(scriptdir, DEFAULT_DATA_FILE)
     default_test = os.path.join(scriptdir, DEFAULT_TEST_FILE)
+    if not os.path.exists(default_test):
+        parent_test = os.path.join(os.path.dirname(scriptdir), DEFAULT_TEST_FILE)
+        if os.path.exists(parent_test):
+            default_test = parent_test
 
     datapath = sys.argv[1] if len(sys.argv) > 1 else default_data
     try:
